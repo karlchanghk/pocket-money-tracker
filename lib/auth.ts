@@ -18,14 +18,18 @@ export function signToken(userId: number, username: string): string {
 
 export function verifyToken(token: string): { sub: number; username: string } | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as { sub: number; username: string };
+    const decoded = jwt.verify(token, JWT_SECRET) as unknown;
+    if (decoded && typeof decoded === 'object' && 'sub' in decoded && 'username' in decoded) {
+      return decoded as { sub: number; username: string };
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
-export function getAuthUser(): { id: number; username: string } | null {
-  const cookieStore = cookies();
+export async function getAuthUser(): Promise<{ id: number; username: string } | null> {
+  const cookieStore = await cookies();
   const token = cookieStore.get('token')?.value;
   if (!token) return null;
   const decoded = verifyToken(token);

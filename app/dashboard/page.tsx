@@ -5,7 +5,7 @@ import OverviewClient from './OverviewClient';
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
-  const user = getAuthUser();
+  const user = await getAuthUser();
   if (!user) return null;
 
   const now = new Date();

@@ -165,12 +165,14 @@ async function initSqlite(): Promise<Db> {
 
   if (fs.existsSync(DB_PATH)) {
     const data = fs.readFileSync(DB_PATH);
-    _sqlDb = new SQL.Database(data);
+    _sqlDb = new (SQL.Database as any)(data);
   } else {
-    _sqlDb = new SQL.Database();
+    _sqlDb = new (SQL.Database as any)();
   }
 
-  _sqlDb.run(`
+  const sqlDb = _sqlDb;
+
+  sqlDb!.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
@@ -199,7 +201,7 @@ async function initSqlite(): Promise<Db> {
   `);
 
   _sqlInitialized = true;
-  return makeSqlDb(_sqlDb);
+  return makeSqlDb(sqlDb!);
 }
 
 function makeSqlDb(db: SqlJsDatabase): Db {

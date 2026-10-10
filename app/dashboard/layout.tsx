@@ -9,12 +9,12 @@ const navItems = [
   { href: '/dashboard/stats', label: '统计分析', icon: '📈' },
 ];
 
-export default function DashboardLayout({
+export default async function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const user = getAuthUser();
+  const user = await getAuthUser();
   if (!user) redirect('/login');
 
   return (
