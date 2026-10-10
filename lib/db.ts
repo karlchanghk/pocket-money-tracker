@@ -1,42 +1,131 @@
-import { drizzle } from 'drizzle-orm/sql-js';
-import initSqlJs, { Database } from 'sql.js';
+// Database abstraction layer
+// - Local dev (no DATABASE_URL): sql.js (in-memory/persisted file)
+// - Production (with DATABASE_URL): PostgreSQL via pg (Supabase)
+
+export interface QueryResult<T = any> {
+  rows: T[];
+  rowCount: number;
+}
+
+export interface Db {
+  dialect: 'sqlite' | 'postgres';
+  query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>>;
+  exec(sql: string, params?: any[]): Promise<number>; // returns last inserted id or affected rows
+  close?(): Promise<void>;
+}
+
+let _db: Db | null = null;
+
+export async function getDb(): Promise<Db> {
+  if (_db) return _db;
+
+  const dbUrl = process.env.DATABASE_URL;
+  if (dbUrl) {
+    // PostgreSQL / Supabase
+    _db = await initPg(dbUrl);
+  } else {
+    // Local sql.js
+    _db = await initSqlite();
+  }
+  return _db;
+}
+
+// ==================== PostgreSQL (Supabase) ====================
+
+async function initPg(connectionString: string): Promise<Db> {
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString });
+
+  // Test connection & ensure schema
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS categories (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        icon TEXT DEFAULT '💰',
+        UNIQUE(user_id, name)
+      );
+
+      CREATE TABLE IF NOT EXISTS records (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date DATE NOT NULL,
+        amount NUMERIC(12,2) NOT NULL,
+        content TEXT NOT NULL,
+        category_id BIGINT REFERENCES categories(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+  } finally {
+    client.release();
+  }
+
+  return {
+    dialect: 'postgres' as const,
+    async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
+      // Convert SQLite-style ? placeholders to PG $1, $2, ...
+      const pgSql = convertPlaceholders(sql);
+      const result = await pool.query(pgSql, params || []);
+      return { rows: result.rows as T[], rowCount: result.rowCount || 0 };
+    },
+    async exec(sql: string, params?: any[]): Promise<number> {
+      const pgSql = convertPlaceholders(sql);
+      // Try to use RETURNING id for INSERT; for other statements use rowCount
+      if (/^\s*INSERT\s/i.test(sql) && !/RETURNING/i.test(sql)) {
+        const result = await pool.query(pgSql + ' RETURNING id', params || []);
+        return result.rows[0]?.id || 0;
+      }
+      const result = await pool.query(pgSql, params || []);
+      return result.rowCount || 0;
+    },
+  };
+}
+
+// ==================== SQLite (sql.js) ====================
+
+import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
-let _db: Database | null = null;
-let _initialized = false;
-
+let _sqlDb: SqlJsDatabase | null = null;
+let _sqlInitialized = false;
 const DB_PATH = path.join(process.cwd(), 'data', 'pocket-money.db');
 
-export async function getDb() {
-  if (_initialized && _db) return _db;
+async function initSqlite(): Promise<Db> {
+  if (_sqlInitialized && _sqlDb) {
+    return makeSqlDb(_sqlDb);
+  }
 
-  // Resolve wasm file path explicitly to avoid Next.js bundler issues
   const wasmPath = path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
   const wasmBinary = fs.readFileSync(wasmPath);
   const SQL = await initSqlJs({ wasmBinary: wasmBinary.buffer as ArrayBuffer });
 
-  // Ensure data directory exists
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  // Load existing DB or create new one
   if (fs.existsSync(DB_PATH)) {
     const data = fs.readFileSync(DB_PATH);
-    _db = new SQL.Database(data);
+    _sqlDb = new SQL.Database(data);
   } else {
-    _db = new SQL.Database();
+    _sqlDb = new SQL.Database();
   }
 
-  // Run schema
-  _db.run(`
+  _sqlDb.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-
     CREATE TABLE IF NOT EXISTS categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -45,7 +134,6 @@ export async function getDb() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       UNIQUE(user_id, name)
     );
-
     CREATE TABLE IF NOT EXISTS records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -59,18 +147,48 @@ export async function getDb() {
     );
   `);
 
-  _initialized = true;
-  return _db;
+  _sqlInitialized = true;
+  return makeSqlDb(_sqlDb);
 }
 
-export function persistDb(db: Database) {
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const data = db.export();
-  fs.writeFileSync(DB_PATH, Buffer.from(data));
+function makeSqlDb(db: SqlJsDatabase): Db {
+  const persist = () => {
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const data = db.export();
+    fs.writeFileSync(DB_PATH, Buffer.from(data));
+  };
+
+  return {
+    dialect: 'sqlite' as const,
+    async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
+      const stmt = db.prepare(sql);
+      if (params && params.length > 0) stmt.bind(params);
+      const rows: any[] = [];
+      while (stmt.step()) rows.push(stmt.getAsObject());
+      stmt.free();
+      return { rows: rows as T[], rowCount: rows.length };
+    },
+    async exec(sql: string, params?: any[]): Promise<number> {
+      // For INSERT with specific handling
+      if (/^\s*INSERT\s/i.test(sql)) {
+        db.run(sql, params || []);
+        persist();
+        const r = db.exec('SELECT last_insert_rowid() as id');
+        return r[0]?.values[0]?.[0] || 0;
+      }
+      const changes = db.exec(sql, params || []);
+      persist();
+      // sql.js run() doesn't return rowcount directly; approximate
+      return changes ? changes.length : 0;
+    },
+  };
 }
 
-export function getDrizzle() {
-  // We use raw SQL for simplicity with sql.js
-  return null as any;
+// ==================== Helpers ====================
+
+// Convert SQLite-style ? placeholders to PG $1, $2, ...
+function convertPlaceholders(sql: string): string {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
 }

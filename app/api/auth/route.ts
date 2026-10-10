@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, persistDb } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { hashPassword, verifyPassword, signToken } from '@/lib/auth';
 
 export async function POST(request: NextRequest) {
@@ -18,46 +18,47 @@ export async function POST(request: NextRequest) {
   const db = await getDb();
 
   if (action === 'register') {
-    const existing = db.exec('SELECT id FROM users WHERE username = ?', [username]);
-    if (existing.length > 0 && existing[0].values.length > 0) {
+    const existing = await db.query('SELECT id FROM users WHERE username = ?', [username]);
+    if (existing.rows.length > 0) {
       return NextResponse.json({ error: '用户名已存在' }, { status: 409 });
     }
 
     const hash = hashPassword(password);
-    db.run('INSERT INTO users (username, password_hash) VALUES (?, ?)', [username, hash]);
-    persistDb(db);
+    const userId = await db.exec(
+      'INSERT INTO users (username, password_hash) VALUES (?, ?)',
+      [username, hash]
+    );
 
-    const result = db.exec('SELECT last_insert_rowid() as id');
-    const userId = result[0].values[0][0] as number;
-
-    // Initialize default categories for new user
+    // Initialize default categories
     const defaults = [
       ['餐饮', '🍜'], ['交通', '🚌'], ['购物', '🛍️'],
       ['娱乐', '🎮'], ['居家', '🏠'], ['其他', '📦'],
     ];
     for (const [name, icon] of defaults) {
-      db.run('INSERT INTO categories (user_id, name, icon) VALUES (?, ?, ?)', [userId, name, icon]);
+      await db.exec('INSERT INTO categories (user_id, name, icon) VALUES (?, ?, ?)', [userId, name, icon]);
     }
-    persistDb(db);
 
     const token = signToken(userId, username);
     const res = NextResponse.json({ success: true, username });
-    res.cookies.set('token', token, { httpOnly: true, maxAge: 60 * 60 * 24 * 30 });
+    res.cookies.set('token', token, { httpOnly: true, maxAge: 60 * 60 * 24 * 30, sameSite: 'lax' });
     return res;
   }
 
   // login
-  const rows = db.exec('SELECT id, password_hash FROM users WHERE username = ?', [username]);
-  if (rows.length === 0 || rows[0].values.length === 0) {
+  const users = await db.query<{ id: number; password_hash: string }>(
+    'SELECT id, password_hash FROM users WHERE username = ?',
+    [username]
+  );
+  if (users.rows.length === 0) {
     return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
   }
-  const [id, hash] = rows[0].values[0] as [number, string];
-  if (!verifyPassword(password, hash)) {
+  const user = users.rows[0];
+  if (!verifyPassword(password, user.password_hash)) {
     return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
   }
 
-  const token = signToken(id, username);
+  const token = signToken(user.id, username);
   const res = NextResponse.json({ success: true, username });
-  res.cookies.set('token', token, { httpOnly: true, maxAge: 60 * 60 * 24 * 30 });
+  res.cookies.set('token', token, { httpOnly: true, maxAge: 60 * 60 * 24 * 30, sameSite: 'lax' });
   return res;
 }

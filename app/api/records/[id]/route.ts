@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, persistDb } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
 
 export async function DELETE(
@@ -11,9 +11,7 @@ export async function DELETE(
 
   const { id } = await params;
   const db = await getDb();
-
-  db.run('DELETE FROM records WHERE id = ? AND user_id = ?', [parseInt(id, 10), user.id]);
-  persistDb(db);
+  await db.exec('DELETE FROM records WHERE id = ? AND user_id = ?', [parseInt(id, 10), user.id]);
 
   return NextResponse.json({ success: true });
 }

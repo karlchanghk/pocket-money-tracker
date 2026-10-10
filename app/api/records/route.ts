@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, persistDb } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
 
 export async function GET(request: NextRequest) {
@@ -38,16 +38,7 @@ export async function GET(request: NextRequest) {
   sql += ' ORDER BY r.date DESC, r.id DESC LIMIT ?';
   params.push(limit);
 
-  const result = db.exec(sql, params);
-  const columns = result[0]?.columns || [];
-  const rows = result[0]?.values || [];
-
-  const records = rows.map(row => {
-    const obj: any = {};
-    columns.forEach((col, i) => { obj[col] = row[i]; });
-    return obj;
-  });
-
+  const { rows: records } = await db.query(sql, params);
   return NextResponse.json({ records });
 }
 
@@ -63,13 +54,10 @@ export async function POST(request: NextRequest) {
   }
 
   const db = await getDb();
-  db.run(
+  const id = await db.exec(
     'INSERT INTO records (user_id, date, amount, content, category_id) VALUES (?, ?, ?, ?, ?)',
     [user.id, date, parseFloat(amount), content, categoryId || null]
   );
-  persistDb(db);
 
-  const result = db.exec('SELECT last_insert_rowid() as id');
-  const newId = result[0].values[0][0];
-  return NextResponse.json({ success: true, id: newId });
+  return NextResponse.json({ success: true, id });
 }

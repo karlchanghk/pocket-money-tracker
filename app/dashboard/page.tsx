@@ -22,44 +22,43 @@ export default async function DashboardPage() {
 
   const db = await getDb();
 
-  const sum = (from: string, to: string) => {
-    const r = db.exec(
-      'SELECT COALESCE(SUM(amount), 0) FROM records WHERE user_id = ? AND date >= ? AND date <= ?',
+  const getSum = async (from: string, to: string) => {
+    const { rows } = await db.query<{ total: number }>(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM records WHERE user_id = ? AND date >= ? AND date <= ?',
       [user.id, from, to]
     );
-    return r[0]?.values[0]?.[0] || 0;
+    const v = rows[0]?.total;
+    return typeof v === 'string' ? parseFloat(v) : Number(v || 0);
   };
 
   const totals = {
-    today: sum(todayStr, todayStr),
-    week: sum(weekStartStr, todayStr),
-    month: sum(monthStart, todayStr),
-    year: sum(yearStart, todayStr),
+    today: await getSum(todayStr, todayStr),
+    week: await getSum(weekStartStr, todayStr),
+    month: await getSum(monthStart, todayStr),
+    year: await getSum(yearStart, todayStr),
   };
 
-  // Recent 10 records
-  const recResult = db.exec(`
-    SELECT r.*, c.name as category_name, c.icon as category_icon
-    FROM records r LEFT JOIN categories c ON r.category_id = c.id
-    WHERE r.user_id = ? ORDER BY r.date DESC, r.id DESC LIMIT 10
-  `, [user.id]);
-  const recCols = recResult[0]?.columns || [];
-  const records = (recResult[0]?.values || []).map(row => {
-    const obj: any = {};
-    recCols.forEach((c, i) => { obj[c] = row[i]; });
-    return obj;
-  });
+  const { rows: records } = await db.query(
+    `SELECT r.*, c.name as category_name, c.icon as category_icon
+     FROM records r LEFT JOIN categories c ON r.category_id = c.id
+     WHERE r.user_id = ? ORDER BY r.date DESC, r.id DESC LIMIT 10`,
+    [user.id]
+  );
 
-  // Category breakdown this month
-  const catResult = db.exec(`
-    SELECT COALESCE(c.name, '未分类') as name, c.icon as icon, SUM(r.amount) as total
-    FROM records r LEFT JOIN categories c ON r.category_id = c.id
-    WHERE r.user_id = ? AND r.date >= ?
-    GROUP BY r.category_id
-    ORDER BY total DESC
-  `, [user.id, monthStart]);
-  const catRows = catResult[0]?.values || [];
-  const byCategory = catRows.map(row => ({ name: row[0], icon: row[1], total: row[2] }));
+  const { rows: byCategory } = await db.query(
+    `SELECT COALESCE(c.name, '未分类') as name, c.icon as icon, SUM(r.amount) as total
+     FROM records r LEFT JOIN categories c ON r.category_id = c.id
+     WHERE r.user_id = ? AND r.date >= ?
+     GROUP BY r.category_id
+     ORDER BY total DESC`,
+    [user.id, monthStart]
+  );
 
-  return <OverviewClient totals={totals} records={records} byCategory={byCategory} />;
+  const cats = byCategory.map((c: any) => ({
+    name: c.name,
+    icon: c.icon,
+    total: typeof c.total === 'string' ? parseFloat(c.total) : Number(c.total),
+  }));
+
+  return <OverviewClient totals={totals} records={records} byCategory={cats} />;
 }
