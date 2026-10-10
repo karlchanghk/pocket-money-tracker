@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "@types/pg": "^8.23.1",
     "bcryptjs": "^2.4.3",
     "clsx": "^2.1.1",

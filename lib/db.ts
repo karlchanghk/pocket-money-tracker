@@ -1,6 +1,7 @@
 // Database abstraction layer
-// - Local dev (no DATABASE_URL): sql.js (in-memory/persisted file)
-// - Production (with DATABASE_URL): PostgreSQL via pg (Supabase)
+// - Local dev (no DATABASE_URL): sql.js (persisted file)
+// - Turso (libsql://...): @libsql/client
+// - Supabase/PostgreSQL (postgres://...): pg driver
 
 export interface QueryResult<T = any> {
   rows: T[];
@@ -8,7 +9,7 @@ export interface QueryResult<T = any> {
 }
 
 export interface Db {
-  dialect: 'sqlite' | 'postgres';
+  dialect: 'sqlite' | 'postgres' | 'turso';
   query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>>;
   exec(sql: string, params?: any[]): Promise<number>; // returns last inserted id or affected rows
   close?(): Promise<void>;
@@ -20,12 +21,12 @@ export async function getDb(): Promise<Db> {
   if (_db) return _db;
 
   const dbUrl = process.env.DATABASE_URL;
-  if (dbUrl) {
-    // PostgreSQL / Supabase
-    _db = await initPg(dbUrl);
-  } else {
-    // Local sql.js
+  if (!dbUrl) {
     _db = await initSqlite();
+  } else if (dbUrl.startsWith('libsql://')) {
+    _db = await initTurso(dbUrl);
+  } else {
+    _db = await initPg(dbUrl);
   }
   return _db;
 }
@@ -86,6 +87,56 @@ async function initPg(connectionString: string): Promise<Db> {
       }
       const result = await pool.query(pgSql, params || []);
       return result.rowCount || 0;
+    },
+  };
+}
+
+// ==================== Turso (libsql) ====================
+
+async function initTurso(url: string): Promise<Db> {
+  const { createClient } = await import('@libsql/client');
+  const client = createClient({ url });
+
+  // Create tables (Turso uses SQLite syntax)
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      icon TEXT DEFAULT '💰',
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(user_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      amount REAL NOT NULL,
+      content TEXT NOT NULL,
+      category_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
+    );
+  `);
+
+  return {
+    dialect: 'turso' as const,
+    async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
+      const result = await client.execute(sql, params || []);
+      const rows = result.rows as T[];
+      return { rows, rowCount: rows.length };
+    },
+    async exec(sql: string, params?: any[]): Promise<number> {
+      const result = await client.execute(sql, params || []);
+      if (result.lastInsertRowid) return Number(result.lastInsertRowid);
+      return result.rowsAffected || 0;
     },
   };
 }
